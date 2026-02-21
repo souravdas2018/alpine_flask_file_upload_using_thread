@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en" x-data="fileUploader()">
+  <head>
+    <meta charset="UTF-8" />
+    <title>File Upload Manager</title>
+    <script
+      src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.0/dist/cdn.min.js"
+      defer
+    ></script>
+  </head>
+  <body>
+    <h2>🗂️ File Upload Manager</h2>
+
+    <div class="file-input">
+      <input
+        type="file"
+        multiple
+        @change="addFiles"
+        accept=".pdf,.doc,.docx, .docs"
+      />
+      <small style="color: #666"
+        >Allowed file types: .pdf, .doc, .docx, .docs</small
+      >
+      <button @click="uploadFiles" :disabled="!files.length || busy">
+        Upload
+      </button>
+    </div>
+
+    <ul class="files-list">
+      <template
+        x-for="(file, index) in files"
+        :key="file.name + '-' + file.status + '-' + file.progress"
+      >
+        <li class="file-item">
+          <span class="name" x-text="file.name"></span>
+
+          <template x-if="file.status !== 'duplicate'">
+            <div class="progress">
+              <div class="bar" :style="`width: ${file.progress}%`"></div>
+            </div>
+          </template>
+
+          <template
+            x-if="file.status === 'queued' || file.status === 'processing'"
+          >
+            <span class="spinner"></span>
+          </template>
+
+          <template x-if="file.status === 'completed'">
+            <span class="tick">✔️</span>
+          </template>
+
+          <template x-if="file.status === 'duplicate'">
+            <span class="tick" style="color: orange">⚠️</span>
+          </template>
+
+          <span
+            class="remove-btn"
+            @click="removeFile(index)"
+            x-show="file.status === 'pending'"
+            >❌</span
+          >
+        </li>
+      </template>
+    </ul>
+
+    <!-- Modal Popup -->
+    <div
+      x-show="showPopup"
+      x-transition
+      class="modal-overlay"
+      @click.outside="showPopup = false"
+    >
+      <div class="modal-content">
+        <h3>✅ Upload Complete</h3>
+        <p>All files have been uploaded successfully!</p>
+        <button @click="showPopup = false; showInputBox = true">OK</button>
+      </div>
+    </div>
+    <div
+        x-show="showInputBox"
+        x-transition
+        style="margin-top: 1rem; text-align: center"
+      >
+        <input
+          type="text"
+          x-model="userInput"
+          placeholder="Enter your message"
+          class="input-box"
+        />
+        <button @click="sendInput">➡️</button>
+  </body>
+</html>
+<script>
+  function fileUploader() {
+    return {
+      files: [],
+      busy: false,
+      toastMessage: "",
+      taskId: null,
+      pollTimer: null,
+      showPopup: false,
+
+      userInput: "",
+      showInputBox: false,
+
+      addFiles(e) {
+        const allowedExtensions = [".pdf", ".doc", ".docx"];
+        const selected = Array.from(e.target.files);
+        selected.forEach((file) => {
+          const ext = file.name.split(".").pop().toLowerCase();
+          if (!allowedExtensions.includes("." + ext)) {
+            alert(`❌ Invalid file type: ${file.name}`);
+            return;
+          }
+
+          if (!this.files.some((f) => f.name === file.name)) {
+            this.files.push({
+              name: file.name,
+              raw: file,
+              status: "pending",
+              progress: 0,
+            });
+          }
+        });
+      },
+
+      removeFile(index) {
+        this.files.splice(index, 1);
+      },
+
+      normalizeName(name) {
+        return name.replace(/[\s]+/g, "_").replace(/_+/g, "_");
+      },
+
+      uploadFiles() {
+        if (!this.files.length) return;
+        this.busy = true;
+
+        const form = new FormData();
+        this.files.forEach((f) => form.append("files", f.raw));
+
+        this.files = this.files.map((f) => ({
+          ...f,
+          status: "processing",
+          progress: 10,
+        }));
+
+        fetch("/upload", {
+          method: "POST",
+          body: form,
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            this.taskId = data.task_id;
+            this.pollStatus();
+          })
+          .catch(() => this.reset("Upload failed"));
+      },
+
+      pollStatus() {
+        this.pollTimer = setInterval(() => {
+          fetch(`/api/get_status/${this.taskId}`)
+            .then((r) => r.json())
+            .then((data) => {
+              try {
+                this.files = this.files.map((file) => {
+                  const normalized = this.normalizeName(file.name);
+
+                  for (const key in data.files) {
+                    if (this.normalizeName(key) === normalized) {
+                      const status = data.files[key].status;
+                      let progress = file.progress;
+
+                      if (status === "queued" || status === "processing") {
+                        progress = 50;
+                      }
+                      if (status === "completed") {
+                        progress = 100;
+                      }
+
+                      return { ...file, status, progress };
+                    }
+                  }
+
+                  return file; // No match found
+                });
+
+                // Force Alpine reactivity — safely excluding non-cloneable fields
+                this.files = JSON.parse(
+                  JSON.stringify(
+                    this.files.map(({ name, status, progress }) => ({
+                      name,
+                      status,
+                      progress,
+                    }))
+                  )
+                );
+
+                const allDone = Object.values(data.files).every((f) => f.done);
+                if (allDone) {
+                  clearInterval(this.pollTimer);
+                  this.busy = false;
+                  // this.toastMessage = "✅ All files uploaded.";
+                  this.showPopup = true;
+                  // setTimeout(() => (this.toastMessage = ""), 4000);
+                }
+              } catch (err) {
+                console.error("Error during file status update:", err);
+              }
+            })
+            .catch((err) => {
+              console.error("Polling error:", err);
+              clearInterval(this.pollTimer);
+              this.reset("Error checking status");
+            });
+        }, 1000);
+      },
+
+      reset(msg) {
+        this.busy = false;
+        clearInterval(this.pollTimer);
+        this.toastMessage = msg;
+        setTimeout(() => (this.toastMessage = ""), 3000);
+      },
+
+      sendInput() {
+        fetch("/submit-text", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ message: this.userInput }),
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            this.userInput = ""
+          //   this.showInputBox = false;
+          //   this.showPopup = false;
+          })
+          .catch((err) => {
+            console.error("Error sending input:", err);
+          });
+      },
+    };
+  }
+</script>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    max-width: 700px;
+    margin: 2rem auto;
+    background: #f9f9f9;
+    padding: 2rem;
+    border-radius: 10px;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+  }
+  .file-input {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  .input-box {
+    padding: 0.5rem;
+    width: 60%;
+    max-width: 600px;
+    border: 1px solid #ccc;
+    border-radius: 10px;
+    margin-right: 0.5rem;
+  }
+  .file-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.5rem;
+    background: white;
+    border-radius: 6px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+  }
+  .progress {
+    flex: 1;
+    height: 6px;
+    margin: 0 1rem;
+    background: #e0e0e0;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .bar {
+    height: 100%;
+    background: #4caf50;
+    width: 0%;
+    transition: width 0.3s;
+  }
+  .spinner {
+    width: 1rem;
+    height: 1rem;
+    border: 2px solid #ccc;
+    border-top-color: #333;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+  .tick {
+    font-size: 1.2rem;
+    color: green;
+  }
+  .remove-btn {
+    margin-left: 10px;
+    color: red;
+    cursor: pointer;
+    font-size: 1.1rem;
+  }
+  .toast {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    background: #ddffdd;
+    color: #333;
+    padding: 0.75rem 1rem;
+    border: 1px solid #c2f5c7;
+    border-radius: 4px;
+  }
+  button {
+    padding: 0.5rem 1rem;
+    background: #4caf50;
+    border: none;
+    color: white;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  button:disabled {
+    background: #ccc;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* Modal styles */
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 999;
+  }
+  .modal-content {
+    background: white;
+    padding: 2rem;
+    border-radius: 8px;
+    text-align: center;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  }
+  .modal-content h3 {
+    margin-bottom: 0.5rem;
+  }
+  .modal-content button {
+    margin-top: 1rem;
+    background: #4caf50;
+    color: white;
+    border: none;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+</style>

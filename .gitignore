@@ -1,0 +1,7 @@
+__pycache__/
+uploads/
+*.pyc
+.env
+.venv
+*.sqlite3
+*.ipynb
